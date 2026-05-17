@@ -1,19 +1,42 @@
-# README
+# Img2Gif
 
-## About
+A fast, modern, and lightweight application designed to convert sequences of images into high-quality animated GIFs. Built with a focus on ease of use and visual appeal, Img2Gif provides a sleek user interface using Wails and a robust backend powered by Go.
 
-This is the official Wails Vanilla template.
+## Features
 
-You can configure the project by editing `wails.json`. More information about the project settings can be found
-here: https://wails.io/docs/reference/project-config
+- **High-Quality Conversion**: Generates smooth and clear GIFs using optimized FFmpeg configurations.
+- **Modern UI/UX**: Built with Vanilla web technologies (HTML/CSS/JS) for a responsive and intuitive design.
+- **Cross-Platform**: Developed using the Wails framework, allowing you to build native-like binaries for Windows, macOS, and Linux from a single codebase.
 
-## Live Development
+## Demo
 
-To run in live development mode, run `wails dev` in the project directory. This will run a Vite development
-server that will provide very fast hot reload of your frontend changes. If you want to develop in a browser
-and have access to your Go methods, there is also a dev server that runs on http://localhost:34115. Connect
-to this in your browser, and you can call your Go code from devtools.
+![Img2Gif Demonstration](assets/demo.gif)
 
-## Building
+## Getting Started
 
-To build a redistributable, production mode package, use `wails build`.
+This project is built using the [Wails](https://wails.io/) framework.
+
+### Prerequisites
+
+- [Go](https://go.dev/) (latest version recommended)
+- [Wails CLI](https://wails.io/docs/gettingstarted/installation)
+
+### Live Development
+
+To run the application in live development mode, simply execute the following command in the project root directory:
+
+```bash
+wails dev
+```
+
+This will start the application with hot-reloading enabled for the frontend. Any changes made to your frontend assets or Go code will be reflected immediately.
+
+## Building for Production
+
+To create a standalone, optimized, and redistributable binary package, run:
+
+```bash
+wails build
+```
+
+This command will output the compiled executable in your `build/bin` directory, ready to be shared and executed.
