@@ -6,13 +6,6 @@
   "frontend:build": "npm run build",
   "frontend:dev:watcher": "npm run dev",
   "frontend:dev:serverUrl": "auto",
-  "info": {
-    "companyName": "Img2Gif",
-    "productName": "Img2Gif",
-    "productVersion": "0.1.0",
-    "copyright": "Copyright © 2026",
-    "comments": "Image sequence to GIF converter"
-  },
   "author": {
     "name": "",
     "email": ""

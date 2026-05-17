@@ -123,13 +123,6 @@ body {
     letter-spacing: 0.5px;
 }
 
-.titlebar-version {
-    font-size: 11px;
-    font-weight: 500;
-    color: var(--text-muted);
-    margin-left: 6px;
-}
-
 .titlebar-controls {
     display: flex;
     align-items: center;

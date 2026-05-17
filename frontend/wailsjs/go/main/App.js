@@ -14,10 +14,6 @@ export function GetProgress() {
   return window['go']['main']['App']['GetProgress']();
 }
 
-export function GetVersion() {
-  return window['go']['main']['App']['GetVersion']();
-}
-
 export function OpenInExplorer(arg1) {
   return window['go']['main']['App']['OpenInExplorer'](arg1);
 }
