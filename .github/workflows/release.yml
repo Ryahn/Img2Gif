@@ -98,39 +98,29 @@ jobs:
           wails build --platform ${{ matrix.platform }} $TAGS \
             -ldflags "-X main.Version=${VERSION}"
 
-      - name: Package Windows build
-        if: matrix.os_name == 'windows'
-        shell: pwsh
-        env:
-          VERSION: ${{ steps.ver.outputs.version }}
-        run: |
-          $artifact = "build/bin/windows-$env:VERSION.exe"
-          Move-Item -Force "build/bin/Img2Gif.exe" $artifact
-          echo "artifact=$artifact" >> $env:GITHUB_OUTPUT
+      - name: Package build
         id: package
-
-      - name: Package Linux build
-        if: matrix.os_name == 'linux'
         shell: bash
         env:
           VERSION: ${{ steps.ver.outputs.version }}
+          OS_NAME: ${{ matrix.os_name }}
         run: |
-          artifact="build/bin/linux-${VERSION}"
-          mv build/bin/Img2Gif "$artifact"
-          chmod +x "$artifact"
+          case "$OS_NAME" in
+            windows)
+              artifact="build/bin/windows-${VERSION}.exe"
+              mv build/bin/Img2Gif.exe "$artifact"
+              ;;
+            linux)
+              artifact="build/bin/linux-${VERSION}"
+              mv build/bin/Img2Gif "$artifact"
+              chmod +x "$artifact"
+              ;;
+            macos)
+              artifact="build/bin/macos-${VERSION}.zip"
+              ditto -c -k --keepParent build/bin/Img2Gif.app "$artifact"
+              ;;
+          esac
           echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
-        id: package
-
-      - name: Package macOS build
-        if: matrix.os_name == 'macos'
-        shell: bash
-        env:
-          VERSION: ${{ steps.ver.outputs.version }}
-        run: |
-          artifact="build/bin/macos-${VERSION}.zip"
-          ditto -c -k --keepParent build/bin/Img2Gif.app "$artifact"
-          echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
-        id: package
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
