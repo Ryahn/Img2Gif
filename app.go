@@ -93,6 +93,11 @@ func (a *App) CheckFFmpeg() bool {
 	return err == nil
 }
 
+// GetVersion returns the application version string.
+func (a *App) GetVersion() string {
+	return Version
+}
+
 // CancelGenerate aborts an in-progress GIF generation.
 func (a *App) CancelGenerate() {
 	a.genMu.Lock()
