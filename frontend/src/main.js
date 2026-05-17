@@ -19,6 +19,7 @@ const state = {
     folderPath: '',
     images: [],
     outputPath: '',
+    version: '',
     generating: false,
     progressInterval: null,
     config: {
@@ -44,6 +45,7 @@ function renderApp() {
             <div class="titlebar-brand">
                 <div class="titlebar-icon">🎞</div>
                 <span class="titlebar-title">Img2Gif</span>
+                ${state.version ? `<span class="titlebar-version">v${escapeHtml(state.version)}</span>` : ''}
             </div>
             <div class="titlebar-controls">
                 <button class="titlebar-btn" id="btn-minimize" title="Minimize">─</button>
@@ -532,6 +534,9 @@ function showToast(type, message, filePath) {
 }
 
 async function initApp() {
+    try {
+        state.version = await window.go.main.App.GetVersion();
+    } catch (e) { /* bindings unavailable during dev */ }
     renderApp();
     try {
         const ok = await window.go.main.App.CheckFFmpeg();

@@ -8,6 +8,8 @@ export function GetImages(arg1:string):Promise<Array<main.ImageInfo>>;
 
 export function GetProgress():Promise<number>;
 
+export function GetVersion():Promise<string>;
+
 export function OpenInExplorer(arg1:string):Promise<void>;
 
 export function SelectFolder():Promise<string>;
