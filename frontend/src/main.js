@@ -1,11 +1,26 @@
 import './style.css';
 
+function escapeHtml(value) {
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function normalizePadColorInput(raw) {
+    const hex = String(raw).replace('#', '').slice(0, 6);
+    return /^[0-9A-Fa-f]{6}$/.test(hex) ? hex.toLowerCase() : null;
+}
+
 // ─── State ───
 const state = {
     folderPath: '',
     images: [],
     outputPath: '',
     generating: false,
+    progressInterval: null,
     config: {
         width: 480,
         height: 480,
@@ -45,7 +60,7 @@ function renderApp() {
                     <div class="dropzone-icon">📂</div>
                     <div class="dropzone-title">${state.folderPath ? 'Folder Selected' : 'Select Image Folder'}</div>
                     <div class="dropzone-subtitle">${state.folderPath ? 'Click to change folder' : 'Click to browse for a folder with images'}</div>
-                    ${state.folderPath ? `<div class="dropzone-path">${state.folderPath}</div>` : ''}
+                    ${state.folderPath ? `<div class="dropzone-path">${escapeHtml(state.folderPath)}</div>` : ''}
                 </div>
 
                 ${state.images.length > 0 ? `
@@ -54,10 +69,10 @@ function renderApp() {
                     </div>
                     <div class="images-grid" id="images-grid">
                         ${state.images.map((img, i) => `
-                            <div class="image-card" title="${img.name} (${img.width}×${img.height})">
+                            <div class="image-card" title="${escapeHtml(img.name)} (${img.width}×${img.height})">
                                 <div class="image-card-index">${i + 1}</div>
-                                ${img.thumbnail ? `<img src="${img.thumbnail}" alt="${img.name}" loading="lazy"/>` : `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:10px;">${img.name}</div>`}
-                                <div class="image-card-name">${img.name}</div>
+                                ${img.thumbnail ? `<img src="${img.thumbnail}" alt="${escapeHtml(img.name)}" loading="lazy"/>` : `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:10px;">${escapeHtml(img.name)}</div>`}
+                                <div class="image-card-name">${escapeHtml(img.name)}</div>
                             </div>
                         `).join('')}
                     </div>
@@ -156,22 +171,23 @@ function renderApp() {
 
                     <div class="settings-divider"></div>
 
-                    <!-- Fade -->
+                    <!-- Crossfade -->
                     <div class="settings-section">
-                        <div class="settings-section-title">Fade Effects</div>
+                        <div class="settings-section-title">Crossfade</div>
+                        <div class="form-hint">Either option enables smooth transitions between frames.</div>
                         <div class="form-group">
                             <div class="checkbox-group">
                                 <div class="checkbox-option${state.config.fadeIn ? ' checked' : ''}" id="cb-fadein">
                                     <div class="checkbox-box">
                                         <svg viewBox="0 0 12 12"><polyline points="2,6 5,9 10,3"></polyline></svg>
                                     </div>
-                                    <span class="checkbox-label">Fade In</span>
+                                    <span class="checkbox-label">Crossfade (start)</span>
                                 </div>
                                 <div class="checkbox-option${state.config.fadeOut ? ' checked' : ''}" id="cb-fadeout">
                                     <div class="checkbox-box">
                                         <svg viewBox="0 0 12 12"><polyline points="2,6 5,9 10,3"></polyline></svg>
                                     </div>
-                                    <span class="checkbox-label">Fade Out</span>
+                                    <span class="checkbox-label">Crossfade (end)</span>
                                 </div>
                             </div>
                         </div>
@@ -210,7 +226,7 @@ function renderApp() {
                                 <span class="form-label-text">Save Location</span>
                             </div>
                             <div class="output-row">
-                                <input type="text" class="form-input" id="input-output" value="${state.outputPath}" placeholder="Auto (same folder)" readonly/>
+                                <input type="text" class="form-input" id="input-output" value="${escapeHtml(state.outputPath)}" placeholder="Auto (same folder)" readonly/>
                                 <button class="btn-browse" id="btn-browse-output">Browse</button>
                             </div>
                         </div>
@@ -219,9 +235,12 @@ function renderApp() {
 
                 <!-- Generate Button -->
                 <div class="generate-section">
-                    <button class="generate-btn${state.generating ? ' generating' : ''}" id="btn-generate" ${state.images.length === 0 || state.generating ? 'disabled' : ''}>
-                        ${state.generating ? '<span class="spinner"></span>Generating...' : '🎬 Generate GIF'}
-                    </button>
+                    <div class="generate-actions">
+                        <button class="generate-btn${state.generating ? ' generating' : ''}" id="btn-generate" ${state.images.length === 0 || state.generating ? 'disabled' : ''}>
+                            ${state.generating ? '<span class="spinner"></span>Generating...' : '🎬 Generate GIF'}
+                        </button>
+                        ${state.generating ? '<button class="cancel-btn" id="btn-cancel">Cancel</button>' : ''}
+                    </div>
                     <div class="progress-container${state.generating ? ' visible' : ''}" id="progress-container">
                         <div class="progress-bar-track">
                             <div class="progress-bar-fill" id="progress-fill" style="width: 0%"></div>
@@ -244,7 +263,6 @@ function renderApp() {
 
 // ─── Event Binding ───
 function bindEvents() {
-    // Window controls
     document.getElementById('btn-minimize')?.addEventListener('click', () => {
         window.runtime?.WindowMinimise();
     });
@@ -255,10 +273,8 @@ function bindEvents() {
         window.runtime?.Quit();
     });
 
-    // Folder selection
     document.getElementById('dropzone')?.addEventListener('click', selectFolder);
 
-    // Dimension inputs
     document.getElementById('input-width')?.addEventListener('change', (e) => {
         const val = parseInt(e.target.value);
         if (val >= 16 && val <= 4096) state.config.width = val;
@@ -268,26 +284,22 @@ function bindEvents() {
         if (val >= 16 && val <= 4096) state.config.height = val;
     });
 
-    // Delay slider
     document.getElementById('input-delay')?.addEventListener('input', (e) => {
         state.config.delay = parseInt(e.target.value);
         document.getElementById('delay-value').textContent = `${state.config.delay}ms`;
     });
 
-    // Loop slider
     document.getElementById('input-loop')?.addEventListener('input', (e) => {
         state.config.loopCount = parseInt(e.target.value);
         const label = state.config.loopCount === 0 ? '∞ Infinite' : state.config.loopCount === -1 ? 'No Loop' : state.config.loopCount + '×';
         document.getElementById('loop-value').textContent = label;
     });
 
-    // Scale mode radio
     document.querySelectorAll('.radio-option').forEach(opt => {
         opt.addEventListener('click', () => {
             state.config.scaleMode = opt.dataset.mode;
             document.querySelectorAll('.radio-option').forEach(r => r.classList.remove('selected'));
             opt.classList.add('selected');
-            // Show/hide pad color
             const padSection = document.getElementById('pad-color-section');
             if (state.config.scaleMode === 'fit') {
                 padSection.classList.add('visible');
@@ -297,7 +309,6 @@ function bindEvents() {
         });
     });
 
-    // Pad color
     const colorPreview = document.getElementById('color-preview');
     const nativePicker = document.getElementById('native-color-picker');
     const padInput = document.getElementById('input-padcolor');
@@ -310,13 +321,18 @@ function bindEvents() {
         padInput.value = hex;
     });
     padInput?.addEventListener('change', (e) => {
-        const hex = e.target.value.replace('#', '').slice(0, 6);
+        const hex = normalizePadColorInput(e.target.value);
+        if (!hex) {
+            showToast('error', 'Bar color must be a 6-digit hex value (e.g. 000000)');
+            padInput.value = state.config.padColor;
+            return;
+        }
         state.config.padColor = hex;
         colorPreview.style.background = `#${hex}`;
         nativePicker.value = `#${hex}`;
+        padInput.value = hex;
     });
 
-    // Fade checkboxes
     document.getElementById('cb-fadein')?.addEventListener('click', () => {
         state.config.fadeIn = !state.config.fadeIn;
         document.getElementById('cb-fadein').classList.toggle('checked');
@@ -328,23 +344,19 @@ function bindEvents() {
         updateFadeVisibility();
     });
 
-    // Fade duration
     document.getElementById('input-fade')?.addEventListener('input', (e) => {
         state.config.fadeDuration = parseFloat(e.target.value);
         document.getElementById('fade-value').textContent = `${state.config.fadeDuration.toFixed(1)}s`;
     });
 
-    // Quality
     document.getElementById('input-quality')?.addEventListener('input', (e) => {
         state.config.quality = parseInt(e.target.value);
         document.getElementById('quality-value').textContent = state.config.quality;
     });
 
-    // Output browse
     document.getElementById('btn-browse-output')?.addEventListener('click', browseOutput);
-
-    // Generate
     document.getElementById('btn-generate')?.addEventListener('click', generateGif);
+    document.getElementById('btn-cancel')?.addEventListener('click', cancelGenerate);
 }
 
 function updateFadeVisibility() {
@@ -353,6 +365,13 @@ function updateFadeVisibility() {
         fadeOpts.classList.add('visible');
     } else {
         fadeOpts.classList.remove('visible');
+    }
+}
+
+function stopProgressPolling() {
+    if (state.progressInterval) {
+        clearInterval(state.progressInterval);
+        state.progressInterval = null;
     }
 }
 
@@ -366,15 +385,12 @@ async function selectFolder() {
         state.images = [];
         renderApp();
 
-        // Load images
         const images = await window.go.main.App.GetImages(path);
         state.images = images || [];
 
-        // Auto-detect first image dimensions
         if (state.images.length > 0 && state.images[0].width > 0) {
             state.config.width = state.images[0].width;
             state.config.height = state.images[0].height;
-            // Cap at reasonable size
             if (state.config.width > 800) {
                 const ratio = state.config.height / state.config.width;
                 state.config.width = 800;
@@ -402,14 +418,25 @@ async function browseOutput() {
     }
 }
 
+async function cancelGenerate() {
+    if (!state.generating) return;
+    try {
+        await window.go.main.App.CancelGenerate();
+    } catch (e) { /* ignore */ }
+    stopProgressPolling();
+    state.generating = false;
+    renderApp();
+    showToast('error', 'GIF generation cancelled');
+}
+
 async function generateGif() {
     if (state.images.length === 0 || state.generating) return;
 
     state.generating = true;
     renderApp();
 
-    // Start progress polling
-    const progressInterval = setInterval(async () => {
+    stopProgressPolling();
+    state.progressInterval = setInterval(async () => {
         try {
             const progress = await window.go.main.App.GetProgress();
             updateProgress(progress);
@@ -433,18 +460,21 @@ async function generateGif() {
         };
 
         const outputPath = await window.go.main.App.GenerateGif(config);
-        clearInterval(progressInterval);
+        stopProgressPolling();
         updateProgress(100);
 
         state.generating = false;
         renderApp();
 
-        showToast('success', `GIF created successfully!`, outputPath);
+        showToast('success', 'GIF created successfully!', outputPath);
     } catch (err) {
-        clearInterval(progressInterval);
+        stopProgressPolling();
         state.generating = false;
         renderApp();
-        showToast('error', `Failed to generate GIF: ${err}`);
+        const message = String(err);
+        if (!message.toLowerCase().includes('cancel')) {
+            showToast('error', `Failed to generate GIF: ${err}`);
+        }
     }
 }
 
@@ -458,12 +488,11 @@ function updateProgress(value) {
     percent.textContent = `${Math.round(value)}%`;
 
     if (value < 10) text.textContent = 'Preparing files...';
-    else if (value < 50) text.textContent = 'Generating palette...';
+    else if (value < 50) text.textContent = 'Processing frames...';
     else if (value < 100) text.textContent = 'Creating GIF...';
     else text.textContent = 'Complete!';
 }
 
-// ─── Toast Notifications ───
 function showToast(type, message, filePath) {
     const container = document.getElementById('toast-container');
     if (!container) return;
@@ -471,17 +500,28 @@ function showToast(type, message, filePath) {
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
 
-    const icon = type === 'success' ? '✅' : '❌';
-    let actionHtml = '';
-    if (filePath) {
-        actionHtml = `<button class="toast-action" onclick="openInExplorer('${filePath.replace(/\\/g, '\\\\')}')">Show in Folder</button>`;
-    }
+    const iconSpan = document.createElement('span');
+    iconSpan.className = 'toast-icon';
+    iconSpan.textContent = type === 'success' ? '✅' : '❌';
 
-    toast.innerHTML = `
-        <span class="toast-icon">${icon}</span>
-        <span class="toast-message">${message}</span>
-        ${actionHtml}
-    `;
+    const msgSpan = document.createElement('span');
+    msgSpan.className = 'toast-message';
+    msgSpan.textContent = message;
+
+    toast.appendChild(iconSpan);
+    toast.appendChild(msgSpan);
+
+    if (filePath) {
+        const btn = document.createElement('button');
+        btn.className = 'toast-action';
+        btn.textContent = 'Show in Folder';
+        btn.addEventListener('click', async () => {
+            try {
+                await window.go.main.App.OpenInExplorer(filePath);
+            } catch (e) { /* ignore */ }
+        });
+        toast.appendChild(btn);
+    }
 
     container.appendChild(toast);
 
@@ -491,12 +531,14 @@ function showToast(type, message, filePath) {
     }, filePath ? 8000 : 4000);
 }
 
-// Global function for toast button
-window.openInExplorer = async function(path) {
+async function initApp() {
+    renderApp();
     try {
-        await window.go.main.App.OpenInExplorer(path);
-    } catch (e) { /* ignore */ }
-};
+        const ok = await window.go.main.App.CheckFFmpeg();
+        if (!ok) {
+            showToast('error', 'FFmpeg was not found on PATH. Install FFmpeg to generate GIFs.');
+        }
+    } catch (e) { /* bindings unavailable during dev */ }
+}
 
-// ─── Initialize ───
-renderApp();
+initApp();

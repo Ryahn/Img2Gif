@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 
 	"github.com/wailsapp/wails/v2"
@@ -26,6 +27,11 @@ func main() {
 		},
 		BackgroundColour: &options.RGBA{R: 10, G: 10, B: 15, A: 255},
 		OnStartup:        app.startup,
+		OnShutdown:       app.shutdown,
+		OnBeforeClose: func(ctx context.Context) (prevent bool) {
+			app.shutdown(ctx)
+			return false
+		},
 		Frameless:         true,
 		Windows: &windows.Options{
 			WebviewIsTransparent:              true,

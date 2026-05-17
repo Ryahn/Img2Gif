@@ -4,22 +4,31 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"image"
+	"image/draw"
+	"image/jpeg"
 	_ "image/gif"
-	_ "image/jpeg"
 	_ "image/png"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
 
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 	_ "golang.org/x/image/bmp"
+	xdraw "golang.org/x/image/draw"
+	_ "golang.org/x/image/tiff"
 	_ "golang.org/x/image/webp"
 )
+
+const thumbnailMaxWidth = 120
+
+var padColorPattern = regexp.MustCompile(`^[0-9A-Fa-f]{6}$`)
 
 // ImageInfo represents info about a single image file
 type ImageInfo struct {
@@ -52,6 +61,12 @@ type App struct {
 	ctx      context.Context
 	progress float64
 	mu       sync.Mutex
+
+	genMu          sync.Mutex
+	cancelGenerate context.CancelFunc
+
+	cmdsMu    sync.Mutex
+	activeCmd []*exec.Cmd
 }
 
 // NewApp creates a new App application struct
@@ -62,6 +77,60 @@ func NewApp() *App {
 // startup is called when the app starts
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	_ = initFFmpegJob()
+}
+
+// shutdown cancels in-flight work and terminates tracked FFmpeg processes.
+func (a *App) shutdown(ctx context.Context) {
+	a.CancelGenerate()
+	a.killActiveFFmpeg()
+	closeFFmpegJob()
+}
+
+// CheckFFmpeg reports whether ffmpeg is available on PATH.
+func (a *App) CheckFFmpeg() bool {
+	_, err := exec.LookPath("ffmpeg")
+	return err == nil
+}
+
+// CancelGenerate aborts an in-progress GIF generation.
+func (a *App) CancelGenerate() {
+	a.genMu.Lock()
+	cancel := a.cancelGenerate
+	a.cancelGenerate = nil
+	a.genMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	a.killActiveFFmpeg()
+}
+
+func (a *App) registerCmd(cmd *exec.Cmd) {
+	a.cmdsMu.Lock()
+	a.activeCmd = append(a.activeCmd, cmd)
+	a.cmdsMu.Unlock()
+}
+
+func (a *App) unregisterCmd(cmd *exec.Cmd) {
+	a.cmdsMu.Lock()
+	for i, c := range a.activeCmd {
+		if c == cmd {
+			a.activeCmd = append(a.activeCmd[:i], a.activeCmd[i+1:]...)
+			break
+		}
+	}
+	a.cmdsMu.Unlock()
+}
+
+func (a *App) killActiveFFmpeg() {
+	a.cmdsMu.Lock()
+	cmds := append([]*exec.Cmd(nil), a.activeCmd...)
+	a.cmdsMu.Unlock()
+	for _, cmd := range cmds {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	}
 }
 
 // SelectFolder opens a native directory picker dialog
@@ -101,19 +170,21 @@ var supportedExtensions = map[string]bool{
 	".tif":  true,
 }
 
-// GetImages scans a folder and returns info about all supported images
-func (a *App) GetImages(folderPath string) ([]ImageInfo, error) {
+// scanImages lists supported images in a folder (metadata only, no thumbnails).
+func scanImages(folderPath string) ([]ImageInfo, error) {
 	if folderPath == "" {
 		return nil, fmt.Errorf("no folder selected")
 	}
 
-	entries, err := os.ReadDir(folderPath)
+	absFolder, err := filepath.Abs(folderPath)
+	if err != nil {
+		return nil, fmt.Errorf("invalid folder path: %w", err)
+	}
+
+	entries, err := os.ReadDir(absFolder)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read directory: %w", err)
 	}
-
-	var images []ImageInfo
-	idx := 0
 
 	var fileNames []os.DirEntry
 	for _, entry := range entries {
@@ -130,20 +201,63 @@ func (a *App) GetImages(folderPath string) ([]ImageInfo, error) {
 		return strings.ToLower(fileNames[i].Name()) < strings.ToLower(fileNames[j].Name())
 	})
 
-	for _, entry := range fileNames {
-		fullPath := filepath.Join(folderPath, entry.Name())
+	var images []ImageInfo
+	for idx, entry := range fileNames {
+		fullPath, err := resolvePathInDir(absFolder, entry.Name())
+		if err != nil {
+			continue
+		}
 		w, h := getImageDimensions(fullPath)
-		thumb := generateThumbnailBase64(fullPath)
-
 		images = append(images, ImageInfo{
-			Name:      entry.Name(),
-			Path:      fullPath,
-			Thumbnail: thumb,
-			Width:     w,
-			Height:    h,
-			Index:     idx,
+			Name:  entry.Name(),
+			Path:  fullPath,
+			Width: w,
+			Height: h,
+			Index: idx,
 		})
-		idx++
+	}
+
+	return images, nil
+}
+
+func resolvePathInDir(dir, name string) (string, error) {
+	candidate := filepath.Join(dir, name)
+	resolved := candidate
+	if link, err := filepath.EvalSymlinks(candidate); err == nil {
+		resolved = link
+	}
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return "", err
+	}
+	absPath, err := filepath.Abs(resolved)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(absDir, absPath)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return "", fmt.Errorf("path escapes folder: %s", name)
+	}
+	return absPath, nil
+}
+
+// GetImages scans a folder and returns info about all supported images (with thumbnails).
+func (a *App) GetImages(folderPath string) ([]ImageInfo, error) {
+	images, err := scanImages(folderPath)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	for i := range images {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		images[i].Thumbnail = generateThumbnailBase64(images[i].Path)
 	}
 
 	return images, nil
@@ -163,23 +277,49 @@ func getImageDimensions(path string) (int, int) {
 	return config.Width, config.Height
 }
 
-func generateThumbnailBase64(path string) string {
-	cmd := exec.Command("ffmpeg",
-		"-i", path,
-		"-vf", "scale=120:-1",
-		"-frames:v", "1",
-		"-f", "mjpeg",
-		"-q:v", "5",
-		"pipe:1",
-	)
-	cmd.Stderr = nil
+func thumbnailSize(src image.Image) (int, int) {
+	bounds := src.Bounds()
+	w, h := bounds.Dx(), bounds.Dy()
+	if w <= 0 || h <= 0 {
+		return 0, 0
+	}
+	if w <= thumbnailMaxWidth {
+		return w, h
+	}
+	nw := thumbnailMaxWidth
+	nh := h * nw / w
+	if nh < 1 {
+		nh = 1
+	}
+	return nw, nh
+}
 
-	output, err := cmd.Output()
+func generateThumbnailBase64(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	src, _, err := image.Decode(f)
 	if err != nil {
 		return ""
 	}
 
-	encoded := base64.StdEncoding.EncodeToString(output)
+	tw, th := thumbnailSize(src)
+	if tw == 0 || th == 0 {
+		return ""
+	}
+
+	dst := image.NewRGBA(image.Rect(0, 0, tw, th))
+	xdraw.CatmullRom.Scale(dst, dst.Bounds(), src, src.Bounds(), draw.Over, nil)
+
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, dst, &jpeg.Options{Quality: 75}); err != nil {
+		return ""
+	}
+
+	encoded := base64.StdEncoding.EncodeToString(buf.Bytes())
 	return "data:image/jpeg;base64," + encoded
 }
 
@@ -196,26 +336,37 @@ func (a *App) setProgress(p float64) {
 	a.progress = p
 }
 
-// runFFmpeg runs an ffmpeg command, captures stderr, and returns a meaningful error
-func runFFmpeg(args ...string) error {
-	logFile, _ := os.OpenFile(filepath.Join(os.TempDir(), "ffmpeg_log.txt"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if logFile != nil {
-		defer logFile.Close()
-		logFile.WriteString(fmt.Sprintf("\n--- EXEC: ffmpeg %s\n", strings.Join(args, " ")))
+func normalizePadColor(raw string) (string, error) {
+	color := strings.TrimPrefix(strings.TrimSpace(raw), "#")
+	if color == "" {
+		return "000000", nil
 	}
+	if !padColorPattern.MatchString(color) {
+		return "", fmt.Errorf("pad color must be a 6-digit hex value")
+	}
+	return strings.ToLower(color), nil
+}
 
-	cmd := exec.Command("ffmpeg", args...)
+// runFFmpeg runs an ffmpeg command with cancellation support.
+func (a *App) runFFmpeg(ctx context.Context, args ...string) error {
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	cmd.Stdout = nil
 
-	err := cmd.Run()
-	
-	if logFile != nil {
-		logFile.WriteString(fmt.Sprintf("ERROR: %v\nSTDERR:\n%s\n---\n", err, stderr.String()))
-	}
+	a.registerCmd(cmd)
+	defer a.unregisterCmd(cmd)
 
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	_ = assignChildToFFmpegJob(cmd.Process.Pid)
+
+	err := cmd.Wait()
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		stderrStr := stderr.String()
 		lines := strings.Split(stderrStr, "\n")
 		var errorLines []string
@@ -251,6 +402,44 @@ func runFFmpeg(args ...string) error {
 	return nil
 }
 
+// escapeConcatPath quotes a path for use in an ffconcat list file.
+func escapeConcatPath(path string) string {
+	path = filepath.ToSlash(path)
+	return strings.ReplaceAll(path, "'", `'\''`)
+}
+
+// writeConcatList writes an ffconcat manifest for one-frame-per-file image inputs.
+func writeConcatList(listPath string, images []ImageInfo) error {
+	var b strings.Builder
+	b.WriteString("ffconcat version 1.0\n")
+	for _, img := range images {
+		b.WriteString("file '")
+		b.WriteString(escapeConcatPath(img.Path))
+		b.WriteString("'\n")
+	}
+	return os.WriteFile(listPath, []byte(b.String()), 0600)
+}
+
+// preprocessFrames scales all source images to uniform PNG frames in one FFmpeg run.
+func (a *App) preprocessFrames(ctx context.Context, images []ImageInfo, tmpDir, frameFilter string) error {
+	listPath := filepath.Join(tmpDir, "inputs.ffconcat")
+	if err := writeConcatList(listPath, images); err != nil {
+		return fmt.Errorf("failed to write concat list: %w", err)
+	}
+
+	outputPattern := filepath.Join(tmpDir, "frame_%05d.png")
+	return a.runFFmpeg(ctx,
+		"-y",
+		"-f", "concat",
+		"-safe", "0",
+		"-i", listPath,
+		"-vf", frameFilter,
+		"-vsync", "0",
+		"-start_number", "0",
+		outputPattern,
+	)
+}
+
 // buildScaleFilter builds the ffmpeg scale+pad/crop filter
 func buildScaleFilter(width, height int, scaleMode, padColor string) string {
 	switch scaleMode {
@@ -278,21 +467,36 @@ func buildScaleFilter(width, height int, scaleMode, padColor string) string {
 }
 
 // GenerateGif creates a GIF from images using FFmpeg.
-//
-// Pipeline:
-//  1. Pre-process each image individually to uniform target size (PNG, rgb24).
-//  2. Combine uniform PNGs directly into GIF using filter_complex with
-//     optional fade + split + palettegen + paletteuse.
-//
-// No intermediate video is used. This is the simplest and most reliable pipeline.
 func (a *App) GenerateGif(config GifConfig) (string, error) {
+	a.genMu.Lock()
+	if a.cancelGenerate != nil {
+		a.genMu.Unlock()
+		return "", fmt.Errorf("GIF generation already in progress")
+	}
+	genCtx, cancel := context.WithCancel(a.ctx)
+	a.cancelGenerate = cancel
+	a.genMu.Unlock()
+
+	defer func() {
+		cancel()
+		a.genMu.Lock()
+		a.cancelGenerate = nil
+		a.genMu.Unlock()
+	}()
+
 	a.setProgress(0)
 
 	if config.InputFolder == "" {
 		return "", fmt.Errorf("no input folder specified")
 	}
 
-	images, err := a.GetImages(config.InputFolder)
+	padColor, err := normalizePadColor(config.PadColor)
+	if err != nil {
+		return "", err
+	}
+	config.PadColor = padColor
+
+	images, err := scanImages(config.InputFolder)
 	if err != nil {
 		return "", err
 	}
@@ -300,7 +504,6 @@ func (a *App) GenerateGif(config GifConfig) (string, error) {
 		return "", fmt.Errorf("no images found in the selected folder")
 	}
 
-	// Output path
 	outputPath := config.OutputPath
 	if outputPath == "" {
 		outputPath = filepath.Join(config.InputFolder, "output.gif")
@@ -309,14 +512,12 @@ func (a *App) GenerateGif(config GifConfig) (string, error) {
 		outputPath += ".gif"
 	}
 
-	// Frame rate from delay
 	delay := config.Delay
 	if delay < 20 {
 		delay = 20
 	}
 	frameRate := fmt.Sprintf("%g", 1000.0/float64(delay))
 
-	// Dimensions
 	width := config.Width
 	height := config.Height
 	if width <= 0 {
@@ -332,43 +533,34 @@ func (a *App) GenerateGif(config GifConfig) (string, error) {
 		height++
 	}
 
-	// Create temp working directory
 	tmpDir, err := os.MkdirTemp("", "img2gif_")
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp directory: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
 
+	if err := genCtx.Err(); err != nil {
+		return "", err
+	}
+
 	a.setProgress(5)
 
-	// Build the scale filter for pre-processing
 	scaleFilter := buildScaleFilter(width, height, config.ScaleMode, config.PadColor)
-	// format=rgb24 strips alpha channel and ensures consistent pixel format
 	frameFilter := scaleFilter + ",format=rgb24"
 
-	// ─── Step 1: Pre-process each image to uniform target size ───
 	totalImages := len(images)
-	for i, img := range images {
-		destPath := filepath.Join(tmpDir, fmt.Sprintf("frame_%05d.png", i))
-		err = runFFmpeg(
-			"-y",
-			"-i", img.Path,
-			"-vf", frameFilter,
-			"-frames:v", "1",
-			destPath,
-		)
-		if err != nil {
-			return "", fmt.Errorf("failed to process image %s: %w", img.Name, err)
+	if err := a.preprocessFrames(genCtx, images, tmpDir, frameFilter); err != nil {
+		if genCtx.Err() != nil {
+			return "", errors.New("GIF generation cancelled")
 		}
-		// Progress: 5% to 40%
-		a.setProgress(5 + float64(i+1)/float64(totalImages)*35)
+		return "", fmt.Errorf("failed to preprocess images: %w", err)
 	}
+	a.setProgress(40)
 
 	inputPattern := filepath.Join(tmpDir, "frame_%05d.png")
 
 	a.setProgress(45)
 
-	// ─── Step 2: Combine PNGs directly into GIF ───
 	quality := config.Quality
 	if quality <= 0 || quality > 256 {
 		quality = 256
@@ -383,7 +575,6 @@ func (a *App) GenerateGif(config GifConfig) (string, error) {
 	if fadeDur <= 0 {
 		fadeDur = 0.5
 	}
-	// To prevent overlapping fades (which xfade doesn't handle well), limit fade duration
 	if fadeDur > delaySec {
 		fadeDur = delaySec
 	}
@@ -394,23 +585,19 @@ func (a *App) GenerateGif(config GifConfig) (string, error) {
 	args = append(args, "-y")
 
 	if crossfade && totalImages > 1 {
-		// PERFECT LOOP CROSSFADE ALGORITHM
-		// To make a perfect loop, each input must be shown for (delaySec + fadeDur) seconds.
-		// We append the very first image again at the end of the input list.
 		inputDur := delaySec + fadeDur
 
 		for i := 0; i <= totalImages; i++ {
 			args = append(args, "-loop", "1", "-t", fmt.Sprintf("%g", inputDur))
 			idx := i
 			if idx == totalImages {
-				idx = 0 // Wrap around to the first image for the final transition
+				idx = 0
 			}
 			args = append(args, "-i", filepath.Join(tmpDir, fmt.Sprintf("frame_%05d.png", idx)))
 		}
 
 		var fg strings.Builder
 		for i := 0; i < totalImages; i++ {
-			// Offset increments by exactly delaySec
 			offset := delaySec * float64(i+1)
 			if i == 0 {
 				fg.WriteString(fmt.Sprintf("[0:v][1:v]xfade=transition=fade:duration=%g:offset=%g[v1];", fadeDur, offset))
@@ -418,20 +605,14 @@ func (a *App) GenerateGif(config GifConfig) (string, error) {
 				fg.WriteString(fmt.Sprintf("[v%d][%d:v]xfade=transition=fade:duration=%g:offset=%g[v%d];", i, i+1, fadeDur, offset, i+1))
 			}
 		}
-		
+
 		lastV := fmt.Sprintf("[v%d]", totalImages)
-		
-		// Trim the video to make the loop seamless:
-		// We cut off the first 'fadeDur' seconds (where Image 0 wasn't faded into yet)
-		// and we end exactly when the final transition back to Image 0 completes.
 		endTime := float64(totalImages)*delaySec + fadeDur
 		fg.WriteString(fmt.Sprintf("%strim=start=%g:end=%g,setpts=PTS-STARTPTS[trimmed];", lastV, fadeDur, endTime))
-		
 		fg.WriteString(fmt.Sprintf("[trimmed]split[s0][s1];[s0]palettegen=max_colors=%d:stats_mode=full[p];[s1][p]paletteuse=dither=sierra2_4a", quality))
-		
+
 		args = append(args, "-filter_complex", fg.String())
 	} else {
-		// Standard image sequence without crossfade
 		args = append(args, "-framerate", frameRate)
 		args = append(args, "-i", inputPattern)
 		filterComplex := fmt.Sprintf("split[s0][s1];[s0]palettegen=max_colors=%d:stats_mode=full[p];[s1][p]paletteuse=dither=sierra2_4a", quality)
@@ -447,18 +628,24 @@ func (a *App) GenerateGif(config GifConfig) (string, error) {
 	args = append(args, "-loop", loopArg)
 	args = append(args, outputPath)
 
-	err = runFFmpeg(args...)
+	err = a.runFFmpeg(genCtx, args...)
 	if err != nil {
+		if genCtx.Err() != nil {
+			return "", errors.New("GIF generation cancelled")
+		}
 		return "", fmt.Errorf("failed to generate GIF: %w", err)
 	}
 
 	a.setProgress(100)
-
 	return outputPath, nil
 }
 
 // OpenInExplorer opens the file's parent folder in Windows Explorer
 func (a *App) OpenInExplorer(path string) error {
-	cmd := exec.Command("explorer", "/select,", path)
+	arg := "/select," + path
+	if strings.ContainsAny(path, ", ") {
+		arg = `/select,"` + path + `"`
+	}
+	cmd := exec.Command("explorer.exe", arg)
 	return cmd.Start()
 }
