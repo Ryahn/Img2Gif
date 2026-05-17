@@ -20,6 +20,27 @@ This project is built using the [Wails](https://wails.io/) framework.
 
 - [Go](https://go.dev/) (latest version recommended)
 - [Wails CLI](https://wails.io/docs/gettingstarted/installation)
+- **FFmpeg** (Required for the program to function, see installation instructions below)
+
+### Installing FFmpeg
+
+> [!IMPORTANT]
+> This application relies heavily on FFmpeg to process and generate the GIF files. You must have FFmpeg installed and available in your system's PATH.
+
+**Windows:**
+You can install FFmpeg via [Winget](https://learn.microsoft.com/en-us/windows/package-manager/winget/) or [Scoop](https://scoop.sh/):
+```powershell
+winget install ffmpeg
+# OR
+scoop install ffmpeg
+```
+
+**Linux (Ubuntu/Debian):**
+```bash
+sudo apt update
+sudo apt install ffmpeg
+```
+
 
 ### Live Development
 
